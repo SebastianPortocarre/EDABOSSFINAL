@@ -12,16 +12,16 @@ using namespace std;
 namespace fs = std::filesystem;
 
 RegistroCiudadanos::RegistroCiudadanos()
-    : nombre_archivo_data("ciudadanos_data.bin"),
-      nombre_archivo_index("ciudadanos_index.bin"),
+    : ciudadano_archivo_data("ciudadanos_data.bin"),
+      pk_archivo_index("ciudadanos_index.bin"),
       cuckooHash(33000000,2) {
     if (!tablas.cargarTablas("tablas")) {
         std::cout << "No se pudieron cargar las tablas. Se crearán nuevas.\n";
     }
 
     if (!cargarDesdeArchivo()) {
-        cout << "Generando 1 millón de ciudadanos aleatorios...\n";
-        generarCiudadanosAleatorios(1000000);
+        cout << "Generando 33 millones de ciudadanos aleatorios...\n";
+        generarCiudadanosAleatorios(3000000);
         guardarEnArchivo();
         tablas.guardarTablas("tablas");
     } else {
@@ -30,6 +30,7 @@ RegistroCiudadanos::RegistroCiudadanos()
 }
 
 RegistroCiudadanos::~RegistroCiudadanos() {
+    actualizarArchivoIndex();
     guardarEnArchivo();
     tablas.guardarTablas("tablas");
 }
@@ -40,9 +41,9 @@ void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
         return;
     }
 
-    ofstream outfile_data(nombre_archivo_data, ios::binary | ios::trunc);
+    ofstream outfile_data(ciudadano_archivo_data, ios::binary | ios::trunc);
     if (!outfile_data.is_open()) {
-        cerr << "No se pudo abrir el archivo " << nombre_archivo_data << " para escribir.\n";
+        cerr << "No se pudo abrir el archivo " << ciudadano_archivo_data << " para escribir.\n";
         return;
     }
 
@@ -152,9 +153,9 @@ void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
     cout << "Generación de ciudadanos aleatorios completada.\n";
 
     // Guardar el índice en el archivo de índice
-    ofstream outfile_index(nombre_archivo_index, ios::binary | ios::trunc);
+    ofstream outfile_index(pk_archivo_index, ios::binary | ios::trunc);
     if (!outfile_index.is_open()) {
-        cerr << "No se pudo abrir el archivo " << nombre_archivo_index << " para escribir el índice.\n";
+        cerr << "No se pudo abrir el archivo " << pk_archivo_index << " para escribir el índice.\n";
         return;
     }
 
@@ -167,15 +168,15 @@ void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
     }
 
     outfile_index.close();
-    cout << "Índice guardado correctamente en " << nombre_archivo_index << ".\n";
+    cout << "Índice guardado correctamente en " << pk_archivo_index << ".\n";
 }
 
 CiudadanoOptimizado* RegistroCiudadanos::buscarCiudadano(uint32_t dni) {
     uint32_t offset;
     if (cuckooHash.buscar(dni, offset)) {
-        ifstream infile_data(nombre_archivo_data, ios::binary);
+        ifstream infile_data(ciudadano_archivo_data, ios::binary);
         if (!infile_data.is_open()) {
-            cerr << "No se pudo abrir el archivo " << nombre_archivo_data << " para leer.\n";
+            cerr << "No se pudo abrir el archivo " << ciudadano_archivo_data << " para leer.\n";
             return nullptr;
         }
 
@@ -259,9 +260,9 @@ void RegistroCiudadanos::insertarCiudadanoManual() {
 
     string ciudadanoData(reinterpret_cast<char*>(&ciudadano), sizeof(CiudadanoOptimizado));
     vector<char> compressedData = Compressor::compress(ciudadanoData);
-    ofstream outfile_data(nombre_archivo_data, ios::binary | ios::app);
+    ofstream outfile_data(ciudadano_archivo_data, ios::binary | ios::app);
     if (!outfile_data.is_open()) {
-        cerr << "No se pudo abrir el archivo " << nombre_archivo_data << " para escribir.\n";
+        cerr << "No se pudo abrir el archivo " << ciudadano_archivo_data << " para escribir.\n";
         return;
     }
 
@@ -284,41 +285,28 @@ void RegistroCiudadanos::insertarCiudadanoManual() {
 bool RegistroCiudadanos::eliminarCiudadano(uint32_t dni) {
     uint32_t offset;
     if (cuckooHash.buscar(dni, offset)) {
+        // Eliminar de la tabla hash
         cuckooHash.eliminar(dni);
-        dnis.erase(std::remove(dnis.begin(), dnis.end(), dni), dnis.end());
 
-        // Guardar el índice actualizado en el archivo de índice
-        // Reescribir el archivo de índice con los DNIs restantes
-        ofstream outfile_index(nombre_archivo_index, ios::binary | ios::trunc);
-        if (!outfile_index.is_open()) {
-            cerr << "No se pudo abrir el archivo " << nombre_archivo_index << " para escribir el índice.\n";
-            return false;
+        // Agregar a la lista de eliminaciones pendientes
+        eliminacionesPendientes.push_back(dni);
+
+        // Opcional: Puedes definir un límite para el tamaño de `eliminacionesPendientes`
+        if (eliminacionesPendientes.size() >= 1000) { // Ajusta el número según tus necesidades
+            actualizarArchivoIndex();
         }
 
-        uint32_t num_registros = dnis.size();
-        outfile_index.write(reinterpret_cast<const char*>(&num_registros), sizeof(num_registros));
-
-        for (uint32_t dni_restante : dnis) {
-            uint32_t offset_restante;
-            if (cuckooHash.buscar(dni_restante, offset_restante)) {
-                outfile_index.write(reinterpret_cast<const char*>(&dni_restante), sizeof(dni_restante));
-                outfile_index.write(reinterpret_cast<const char*>(&offset_restante), sizeof(offset_restante));
-            }
-        }
-
-        outfile_index.close();
-
-        cout << "Ciudadano con DNI " << dni << " eliminado correctamente.\n";
+        std::cout << "Ciudadano con DNI " << dni << " marcado para eliminación.\n";
         return true;
     } else {
-        cout << "Ciudadano con DNI " << dni << " no encontrado.\n";
+        std::cout << "Ciudadano con DNI " << dni << " no encontrado.\n";
         return false;
     }
 }
 
 bool RegistroCiudadanos::cargarDesdeArchivo() {
     // Asegúrate de abrir el archivo de índice correcto
-    ifstream infile_index(nombre_archivo_index, ios::binary);
+    ifstream infile_index(pk_archivo_index, ios::binary);
     if (!infile_index.is_open()) {
         cerr << "Archivo de índice no encontrado. Se generarán nuevos datos.\n";
         return false;
@@ -354,9 +342,9 @@ bool RegistroCiudadanos::cargarDesdeArchivo() {
 // Función para guardar los datos en los archivos binarios
 bool RegistroCiudadanos::guardarEnArchivo() {
     // Reescribir el archivo de índice
-    ofstream outfile_index(nombre_archivo_index, ios::binary | ios::trunc);
+    ofstream outfile_index(pk_archivo_index, ios::binary | ios::trunc);
     if (!outfile_index.is_open()) {
-        cerr << "No se pudo abrir el archivo " << nombre_archivo_index << " para escribir el índice.\n";
+        cerr << "No se pudo abrir el archivo " << pk_archivo_index << " para escribir el índice.\n";
         return false;
     }
 
@@ -373,7 +361,7 @@ bool RegistroCiudadanos::guardarEnArchivo() {
 
     outfile_index.close();
 
-    cout << "Índice guardado correctamente en " << nombre_archivo_index << ".\n";
+    cout << "Índice guardado correctamente en " << pk_archivo_index << ".\n";
     return true;
 }
 
@@ -553,4 +541,39 @@ string RegistroCiudadanos::leerTexto(const string& mensaje, const vector<string>
             cout << "Entrada inválida. Por favor, ingrese solo letras y espacios.\n";
         }
     }
+}
+
+void RegistroCiudadanos::actualizarArchivoIndex() {
+    if (eliminacionesPendientes.empty()) return;
+
+    // Abrir el archivo de índice para escritura
+    std::ofstream outfile_index(pk_archivo_index, std::ios::binary | std::ios::trunc);
+    if (!outfile_index.is_open()) {
+        std::cerr << "No se pudo abrir el archivo " << pk_archivo_index << " para actualizar el índice.\n";
+        return;
+    }
+
+    // Filtrar los `dnis` eliminados de la lista `dnis`
+    dnis.erase(std::remove_if(dnis.begin(), dnis.end(),
+        [this](uint32_t dni) {
+            return std::find(eliminacionesPendientes.begin(), eliminacionesPendientes.end(), dni) != eliminacionesPendientes.end();
+        }), dnis.end());
+
+    // Escribir los `dnis` restantes en el archivo
+    uint32_t num_registros = dnis.size();
+    outfile_index.write(reinterpret_cast<const char*>(&num_registros), sizeof(num_registros));
+
+    for (uint32_t dni : dnis) {
+        uint32_t offset;
+        if (cuckooHash.buscar(dni, offset)) {
+            outfile_index.write(reinterpret_cast<const char*>(&dni), sizeof(dni));
+            outfile_index.write(reinterpret_cast<const char*>(&offset), sizeof(offset));
+        }
+    }
+
+    // Vaciar la lista de eliminaciones pendientes
+    eliminacionesPendientes.clear();
+
+    outfile_index.close();
+    std::cout << "Archivo de índice actualizado con las eliminaciones pendientes.\n";
 }
