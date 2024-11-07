@@ -1,5 +1,4 @@
 #include "RegistroCiudadanos.h"
-#include "Compressor.h"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -9,29 +8,61 @@
 #include <cctype>
 
 using namespace std;
-namespace fs = std::filesystem;
 
 RegistroCiudadanos::RegistroCiudadanos()
-    : nombre_archivo_data("ciudadanos_data.bin"),
-      nombre_archivo_index("ciudadanos_index.bin"),
-      cuckooHash(33000000,2) {
+    : ciudadano_archivo_data("ciudadanos_data.bin"),
+      pk_archivo_index("ciudadanos_index.bin"),
+      cuckooHash(30000000, 2),
+      hash_archivo("cuckoohash.bin"),
+      next_data_offset(0),
+      hash_modificado(false) { // Añadimos un flag para cambios en la tabla hash
+
+    // Reservar capacidad en el vector dnis para evitar realojamientos
+    dnis.reserve(33000000); // Ajusta el número según tus necesidades
+
+    // Abrir el archivo de datos en modo append y mantenerlo abierto
+    outfile_data.open(ciudadano_archivo_data, ios::binary | ios::app);
+    if (!outfile_data.is_open()) {
+        cerr << "No se pudo abrir el archivo " << ciudadano_archivo_data << " para escribir.\n";
+        // Manejar el error según corresponda
+    }
+
     if (!tablas.cargarTablas("tablas")) {
         std::cout << "No se pudieron cargar las tablas. Se crearán nuevas.\n";
     }
 
     if (!cargarDesdeArchivo()) {
-        cout << "Generando 1 millón de ciudadanos aleatorios...\n";
-        generarCiudadanosAleatorios(1000000);
-        guardarEnArchivo();
+        cout << "Generando 33 millones de ciudadanos aleatorios...\n";
+        generarCiudadanosAleatorios(33000000);
         tablas.guardarTablas("tablas");
     } else {
         cout << "Datos cargados exitosamente desde los archivos binarios.\n";
+        if (!cuckooHash.cargarDesdeArchivo(hash_archivo)) {
+            cout << "No se pudo cargar la tabla hash, reconstruyéndola...\n";
+            // Ahora sí necesitamos reconstruir la tabla hash
+            reconstruirTablaHash();
+            // Marcamos que la tabla hash ha sido modificada
+            hash_modificado = true;
+        }
     }
 }
 
 RegistroCiudadanos::~RegistroCiudadanos() {
+    // Cerrar el archivo de datos
+    if (outfile_data.is_open()) {
+        outfile_data.close();
+    }
+
+    // Guardar el archivo de índice completo
     guardarEnArchivo();
+
+    // Guardar las tablas auxiliares
     tablas.guardarTablas("tablas");
+
+    // Guardar la tabla hash solo si ha sido modificada
+    if (hash_modificado) {
+        cuckooHash.guardarEnArchivo(hash_archivo);
+    }
 }
 
 void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
@@ -40,15 +71,16 @@ void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
         return;
     }
 
-    ofstream outfile_data(nombre_archivo_data, ios::binary | ios::trunc);
+    // Cerrar y abrir el archivo de datos en modo truncamiento para generar nuevos datos
+    outfile_data.close(); // Cerrar si estaba abierto
+    outfile_data.open(ciudadano_archivo_data, ios::binary | ios::trunc);
     if (!outfile_data.is_open()) {
-        cerr << "No se pudo abrir el archivo " << nombre_archivo_data << " para escribir.\n";
+        cerr << "No se pudo abrir el archivo " << ciudadano_archivo_data << " para escribir.\n";
         return;
     }
 
     random_device rd;
     mt19937 gen(rd());
-    uniform_int_distribution<uint32_t> dis_dni(DNI_MIN, DNI_MAX);
 
     vector<string> nombres = {
         "Juan", "María", "Carlos", "Ana", "Luis", "Carmen",
@@ -64,7 +96,7 @@ void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
         "Ortiz", "Silva", "Mendoza", "Cortez", "Ruiz", "Reyes",
         "Fernández", "Herrera", "Molina", "Navarro", "Ramos", "Romero"
     };
-    vector<string> departamentos_lista = { "Amazonas", "Ancash", "Apurímac", "Arequipa", "Ayacucho", "Cajamarca", "Callao", "Cusco", "Huancavelica", "Huanuco", "Ica", "Junín", "La Libertad", "Lambayeque", "Lima", "Loreto", "Madre de Dios", "Moquegua", "Pasco", "Piura", "Puno", "San Martín", "Tacna", "Tumbes", "Ucayali"};
+    vector<string> departamentos_lista = { "Amazonas", "Ancash", "Apurímac", "Arequipa", "Ayacucho", "Cajamarca", "Callao", "Cusco", "Huancavelica", "Huánuco", "Ica", "Junín", "La Libertad", "Lambayeque", "Lima", "Loreto", "Madre de Dios", "Moquegua", "Pasco", "Piura", "Puno", "San Martín", "Tacna", "Tumbes", "Ucayali"};
     vector<string> provincias_lista = { "Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Huancayo", "Huaraz", "Juliaca", "Abancay", "Tacna" };
     vector<string> ciudades_lista = { "Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Huancayo", "Huaraz", "Juliaca", "Abancay", "Tacna" };
     vector<string> distritos_lista = { "Miraflores", "San Isidro", "Cusco", "Trujillo", "Piura", "Huancayo", "Huaraz", "Juliaca", "Abancay", "Tacna" };
@@ -73,37 +105,41 @@ void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
 
     // Generador para seleccionar elementos aleatorios de las listas
     uniform_int_distribution<> dis_nombres(0, nombres.size() - 1);
-    uniform_int_distribution<> dis_apellidos_dist(0, apellidos.size() - 1);
+    uniform_int_distribution<> dis_apellidos(0, apellidos.size() - 1);
     uniform_int_distribution<> dis_departamentos(0, departamentos_lista.size() - 1);
     uniform_int_distribution<> dis_provincias(0, provincias_lista.size() - 1);
-    uniform_int_distribution<> dis_ciudades_dist(0, ciudades_lista.size() - 1);
+    uniform_int_distribution<> dis_ciudades(0, ciudades_lista.size() - 1);
     uniform_int_distribution<> dis_distritos(0, distritos_lista.size() - 1);
     uniform_int_distribution<> dis_ubicaciones(0, ubicaciones_lista.size() - 1);
-    uniform_int_distribution<> dis_dominios_dist(0, dominios.size() - 1);
+    uniform_int_distribution<> dis_dominios(0, dominios.size() - 1);
     uniform_int_distribution<> dis_nacionalidad(0, 1);
     uniform_int_distribution<> dis_estado_civil(0, 3);
     uniform_int_distribution<uint32_t> dis_telefono(900000000, 999999999);
 
-    vector<pair<uint32_t, uint32_t>> index_entries;
+    // Buffer para almacenar múltiples ciudadanos antes de escribirlos al archivo
+    const size_t BUFFER_SIZE = 100000; // Puedes ajustar este valor según la memoria disponible
+    vector<CiudadanoOptimizado> buffer_ciudadanos;
+    buffer_ciudadanos.reserve(BUFFER_SIZE);
+
+    // Generar DNIs secuenciales dentro del rango permitido
+    uint32_t dni_actual = DNI_MIN;
+
+    next_data_offset = 0; // Inicializamos el offset al principio del archivo
 
     for (int i = 0; i < cantidad; ++i) {
         CiudadanoOptimizado ciudadano;
-        uint32_t dni;
-        uint32_t offset;
 
-        do {
-            dni = dis_dni(gen);
-        } while (cuckooHash.buscar(dni, offset));
+        // Asignar DNI secuencialmente
+        ciudadano.dni = dni_actual++;
+        dnis.push_back(ciudadano.dni);
 
-        ciudadano.dni = dni;
-        dnis.push_back(dni);
-
+        // Generar datos aleatorios
         string nombre = nombres[dis_nombres(gen)];
-        string apellido = apellidos[dis_apellidos_dist(gen)];
+        string apellido = apellidos[dis_apellidos(gen)];
         string nombre_completo = nombre + " " + apellido;
         ciudadano.nombres_apellidos = tablas.obtenerIndiceNombreApellido(nombre_completo);
 
-        string lugar_nacimiento = ciudades_lista[dis_ciudades_dist(gen)];
+        string lugar_nacimiento = ciudades_lista[dis_ciudades(gen)];
         ciudadano.lugar_nacimiento = tablas.obtenerIndiceLugarNacimiento(lugar_nacimiento);
 
         ciudadano.nacionalidad = (dis_nacionalidad(gen) == 0) ? Nacionalidad::Peruano : Nacionalidad::Extranjero;
@@ -112,7 +148,7 @@ void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
         ciudadano.direccion.departamento = tablas.obtenerIndiceDepartamento(departamento);
         string provincia = provincias_lista[dis_provincias(gen)];
         ciudadano.direccion.provincia = tablas.obtenerIndiceProvincia(provincia);
-        string ciudad = ciudades_lista[dis_ciudades_dist(gen)];
+        string ciudad = ciudades_lista[dis_ciudades(gen)];
         ciudadano.direccion.ciudad = tablas.obtenerIndiceCiudad(ciudad);
         string distrito = distritos_lista[dis_distritos(gen)];
         ciudadano.direccion.distrito = tablas.obtenerIndiceDistrito(distrito);
@@ -121,97 +157,71 @@ void RegistroCiudadanos::generarCiudadanosAleatorios(int cantidad) {
 
         ciudadano.telefono = dis_telefono(gen);
 
-        string email = generarEmailAleatorio(nombre + apellido, dominios[dis_dominios_dist(gen)]);
+        string email = generarEmailAleatorio(nombre + apellido, dominios[dis_dominios(gen)]);
         ciudadano.email = tablas.obtenerIndiceEmail(email);
 
         ciudadano.estado_civil = static_cast<EstadoCivil>(dis_estado_civil(gen));
 
-        // Serializar y comprimir el ciudadano
-        string ciudadanoData(reinterpret_cast<char*>(&ciudadano), sizeof(CiudadanoOptimizado));
-        vector<char> compressedData = Compressor::compress(ciudadanoData);
+        // Agregar ciudadano al buffer
+        buffer_ciudadanos.push_back(ciudadano);
+        // Actualizar next_data_offset para cada ciudadano
+        uint32_t current_offset = next_data_offset + i * sizeof(CiudadanoOptimizado);
 
-        // Obtener el offset actual del archivo de datos
-        uint32_t current_offset = outfile_data.tellp();
+        // Insertar en la tabla hash
+        cuckooHash.insertar(ciudadano.dni, current_offset);
 
-        // Escribir los datos comprimidos al archivo de datos
-        uint32_t compressedSize = compressedData.size();
-        outfile_data.write(reinterpret_cast<const char*>(&compressedSize), sizeof(uint32_t)); // Escribir el tamaño
-        outfile_data.write(compressedData.data(), compressedSize);
+        // Agregar el DNI al índice incrementalmente
+        guardarEnArchivoIncremental(ciudadano.dni, current_offset);
 
-        cuckooHash.insertar(dni, current_offset);
-
-        // Guardar el índice temporalmente
-        index_entries.emplace_back(dni, current_offset);
+        // Cuando el buffer alcanza el tamaño definido, escribir al archivo
+        if (buffer_ciudadanos.size() == BUFFER_SIZE) {
+            outfile_data.write(reinterpret_cast<const char*>(buffer_ciudadanos.data()),
+                               buffer_ciudadanos.size() * sizeof(CiudadanoOptimizado));
+            buffer_ciudadanos.clear();
+        }
 
         if ((i + 1) % 1000000 == 0) {
             cout << (i + 1) << " ciudadanos generados.\n";
         }
     }
 
-    outfile_data.close();
+    // Escribir cualquier ciudadano restante en el buffer
+    if (!buffer_ciudadanos.empty()) {
+        outfile_data.write(reinterpret_cast<const char*>(buffer_ciudadanos.data()),
+                           buffer_ciudadanos.size() * sizeof(CiudadanoOptimizado));
+        buffer_ciudadanos.clear();
+    }
+
+    outfile_data.flush(); // Asegurar que los datos se escriban en disco
+
+    // Actualizar next_data_offset
+    next_data_offset += cantidad * sizeof(CiudadanoOptimizado);
+
     cout << "Generación de ciudadanos aleatorios completada.\n";
-
-    // Guardar el índice en el archivo de índice
-    ofstream outfile_index(nombre_archivo_index, ios::binary | ios::trunc);
-    if (!outfile_index.is_open()) {
-        cerr << "No se pudo abrir el archivo " << nombre_archivo_index << " para escribir el índice.\n";
-        return;
-    }
-
-    uint32_t num_registros = index_entries.size();
-    outfile_index.write(reinterpret_cast<const char*>(&num_registros), sizeof(num_registros));
-
-    for (const auto& [dni, offset] : index_entries) {
-        outfile_index.write(reinterpret_cast<const char*>(&dni), sizeof(dni));
-        outfile_index.write(reinterpret_cast<const char*>(&offset), sizeof(offset));
-    }
-
-    outfile_index.close();
-    cout << "Índice guardado correctamente en " << nombre_archivo_index << ".\n";
 }
 
 CiudadanoOptimizado* RegistroCiudadanos::buscarCiudadano(uint32_t dni) {
     uint32_t offset;
     if (cuckooHash.buscar(dni, offset)) {
-        ifstream infile_data(nombre_archivo_data, ios::binary);
+        ifstream infile_data(ciudadano_archivo_data, ios::binary);
         if (!infile_data.is_open()) {
-            cerr << "No se pudo abrir el archivo " << nombre_archivo_data << " para leer.\n";
+            cerr << "No se pudo abrir el archivo " << ciudadano_archivo_data << " para leer.\n";
             return nullptr;
         }
 
         // Mover el cursor al offset
         infile_data.seekg(offset, ios::beg);
 
-        // Leer el tamaño de los datos comprimidos
-        uint32_t compressedSize;
-        infile_data.read(reinterpret_cast<char*>(&compressedSize), sizeof(compressedSize));
-
-        // Verificar que la lectura haya sido exitosa
-        if (infile_data.fail()) {
-            cerr << "Error al leer el tamaño comprimido para el DNI " << dni << ".\n";
-            infile_data.close();
-            return nullptr;
-        }
-
-        // Leer los datos comprimidos
-        vector<char> compressedData(compressedSize);
-        infile_data.read(compressedData.data(), compressedSize);
-
-        if (infile_data.gcount() != static_cast<std::streamsize>(compressedSize)) {
-            cerr << "Error al leer los datos comprimidos para el DNI " << dni << ".\n";
-            infile_data.close();
-            return nullptr;
-        }
-
-        // Descomprimir y deserializar
-        string decompressedData = Compressor::decompress(compressedData);
-        if (decompressedData.size() < sizeof(CiudadanoOptimizado)) {
-            cerr << "Error: Datos descomprimidos incompletos para el DNI " << dni << ".\n";
-            infile_data.close();
-            return nullptr;
-        }
+        // Leer la estructura del ciudadano
         CiudadanoOptimizado* ciudadano = new CiudadanoOptimizado();
-        memcpy(ciudadano, decompressedData.data(), sizeof(CiudadanoOptimizado));
+        infile_data.read(reinterpret_cast<char*>(ciudadano), sizeof(CiudadanoOptimizado));
+
+        if (infile_data.fail()) {
+            cerr << "Error al leer los datos del ciudadano con DNI " << dni << ".\n";
+            delete ciudadano;
+            infile_data.close();
+            return nullptr;
+        }
 
         infile_data.close();
         return ciudadano;
@@ -222,146 +232,135 @@ CiudadanoOptimizado* RegistroCiudadanos::buscarCiudadano(uint32_t dni) {
 }
 
 void RegistroCiudadanos::insertarCiudadanoManual() {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     CiudadanoOptimizado ciudadano;
 
-    ciudadano.dni = leerEntero("Ingrese su numero de DNI: ",DNI_MIN, DNI_MAX);
+    ciudadano.dni = leerEntero("Ingrese su número de DNI: ", DNI_MIN, DNI_MAX);
     uint32_t offset;
     if (cuckooHash.buscar(ciudadano.dni, offset)) {
         cerr << "Error: El DNI ya existe.\n";
         return;
     }
-    dnis.push_back(ciudadano.dni);
 
     ciudadano.nombres_apellidos = tablas.obtenerIndiceNombreApellido(leerTexto("Ingrese el Nombre: ") + " " + leerTexto("Ingrese el Apellido: "));
 
     ciudadano.lugar_nacimiento = tablas.obtenerIndiceLugarNacimiento(leerTexto("Ingrese el Lugar de Nacimiento: "));
 
-    ciudadano.nacionalidad = (leerEntero("Ingrese su nacionalidad, 0->Peruano, 1->Extranjero: ",0, 1) == 0) ? Nacionalidad::Peruano : Nacionalidad::Extranjero;
+    ciudadano.nacionalidad = (leerEntero("Ingrese su nacionalidad, 0->Peruano, 1->Extranjero: ", 0, 1) == 0) ? Nacionalidad::Peruano : Nacionalidad::Extranjero;
 
-    vector<string> departamentos_lista = { "Amazonas", "Ancash", "Apurímac", "Arequipa", "Ayacucho", "Cajamarca", "Callao", "Cusco", "Huancavelica", "Huanuco", "Ica", "Junín", "La Libertad", "Lambayeque", "Lima", "Loreto", "Madre de Dios", "Moquegua", "Pasco", "Piura", "Puno", "San Martín", "Tacna", "Tumbes", "Ucayali"};
+    vector<string> departamentos_lista = {"Amazonas", "Ancash", "Apurímac", "Arequipa", "Ayacucho", "Cajamarca", "Callao", "Cusco", "Huancavelica", "Huanuco", "Ica", "Junín", "La Libertad", "Lambayeque", "Lima", "Loreto", "Madre de Dios", "Moquegua", "Pasco", "Piura", "Puno", "San Martín", "Tacna", "Tumbes", "Ucayali"};
     ciudadano.direccion.departamento = tablas.obtenerIndiceDepartamento(leerTexto("Ingrese el Departamento: ", departamentos_lista));
 
-    vector<string> provincias_lista = { "Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Huancayo", "Huaraz", "Juliaca", "Abancay", "Tacna" };
+    vector<string> provincias_lista = {"Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Huancayo", "Huaraz", "Juliaca", "Abancay", "Tacna" };
     ciudadano.direccion.provincia = tablas.obtenerIndiceProvincia(leerTexto("Ingrese la Provincia: ", provincias_lista));
 
-    vector<string> ciudades_lista = { "Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Huancayo", "Huaraz", "Juliaca", "Abancay", "Tacna" };
+    vector<string> ciudades_lista = {"Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Huancayo", "Huaraz", "Juliaca", "Abancay", "Tacna"};
     ciudadano.direccion.ciudad = tablas.obtenerIndiceCiudad(leerTexto("Ingrese la Ciudad: ", ciudades_lista));
 
     ciudadano.direccion.distrito = tablas.obtenerIndiceDistrito(leerTexto("Ingrese el Distrito: "));
     ciudadano.direccion.ubicacion = tablas.obtenerIndiceUbicacion(leerTexto("Ingrese la Ubicación: "));
 
-    ciudadano.telefono = leerEntero("Ingrese su numero de telefono, entre 900000000 - 999999999: ",900000000, 999999999);
+    ciudadano.telefono = leerEntero("Ingrese su número de teléfono, entre 900000000 - 999999999: ", 900000000, 999999999);
 
     string email = leerEmail("Ingrese el Email: ");
     ciudadano.email = tablas.obtenerIndiceEmail(email);
 
-    ciudadano.estado_civil = static_cast<EstadoCivil>(leerEntero("Ingrese su estado civil, 0->Soltero, 1->Casado, 2->Divorsiado, 3->Viudo: ",0, 3));
+    ciudadano.estado_civil = static_cast<EstadoCivil>(leerEntero("Ingrese su estado civil, 0->Soltero, 1->Casado, 2->Divorciado, 3->Viudo: ", 0, 3));
 
-    string ciudadanoData(reinterpret_cast<char*>(&ciudadano), sizeof(CiudadanoOptimizado));
-    vector<char> compressedData = Compressor::compress(ciudadanoData);
-    ofstream outfile_data(nombre_archivo_data, ios::binary | ios::app);
     if (!outfile_data.is_open()) {
-        cerr << "No se pudo abrir el archivo " << nombre_archivo_data << " para escribir.\n";
+        cerr << "El archivo de datos no está abierto.\n";
         return;
     }
 
+    // Obtener el offset actual (posición al final del archivo)
+    outfile_data.seekp(0, ios::end);
     uint32_t current_offset = outfile_data.tellp();
-    uint32_t compressedSize = compressedData.size();
-    outfile_data.write(reinterpret_cast<const char*>(&compressedSize), sizeof(uint32_t));
-    outfile_data.write(compressedData.data(), compressedSize);
+
+    // Escribir los datos serializados al archivo de datos
+    outfile_data.write(reinterpret_cast<const char*>(&ciudadano), sizeof(CiudadanoOptimizado));
+    outfile_data.flush(); // Asegurar que los datos se escriban en disco
+
     cuckooHash.insertar(ciudadano.dni, current_offset);
+    hash_modificado = true;
 
-    outfile_data.close();
+    // Agregar el DNI a la lista
+    dnis.push_back(ciudadano.dni);
 
-    if (!guardarEnArchivo()) {
-        cerr << "Error al guardar el índice después de insertar el ciudadano.\n";
-        return;
-    }
+    // Agregar el nuevo registro al índice de forma incremental
+    guardarEnArchivoIncremental(ciudadano.dni, current_offset);
 
-    cout << "Ciudadano insertado correctamente.\n";
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end_time - start_time;
+    std::cout << "Ciudadano insertado correctamente en " << elapsed.count() << " segundos.\n";
 }
 
 bool RegistroCiudadanos::eliminarCiudadano(uint32_t dni) {
     uint32_t offset;
     if (cuckooHash.buscar(dni, offset)) {
         cuckooHash.eliminar(dni);
-        dnis.erase(std::remove(dnis.begin(), dnis.end(), dni), dnis.end());
+        hash_modificado = true;
 
-        // Guardar el índice actualizado en el archivo de índice
-        // Reescribir el archivo de índice con los DNIs restantes
-        ofstream outfile_index(nombre_archivo_index, ios::binary | ios::trunc);
-        if (!outfile_index.is_open()) {
-            cerr << "No se pudo abrir el archivo " << nombre_archivo_index << " para escribir el índice.\n";
-            return false;
+        // Eliminar el DNI de la lista de DNIs en memoria
+        auto it = std::find(dnis.begin(), dnis.end(), dni);
+        if (it != dnis.end()) {
+            dnis.erase(it);
         }
 
-        uint32_t num_registros = dnis.size();
-        outfile_index.write(reinterpret_cast<const char*>(&num_registros), sizeof(num_registros));
-
-        for (uint32_t dni_restante : dnis) {
-            uint32_t offset_restante;
-            if (cuckooHash.buscar(dni_restante, offset_restante)) {
-                outfile_index.write(reinterpret_cast<const char*>(&dni_restante), sizeof(dni_restante));
-                outfile_index.write(reinterpret_cast<const char*>(&offset_restante), sizeof(offset_restante));
-            }
-        }
-
-        outfile_index.close();
-
-        cout << "Ciudadano con DNI " << dni << " eliminado correctamente.\n";
+        std::cout << "Ciudadano con DNI " << dni << " eliminado correctamente.\n";
         return true;
     } else {
-        cout << "Ciudadano con DNI " << dni << " no encontrado.\n";
+        std::cout << "Ciudadano con DNI " << dni << " no encontrado.\n";
         return false;
     }
 }
 
 bool RegistroCiudadanos::cargarDesdeArchivo() {
     // Asegúrate de abrir el archivo de índice correcto
-    ifstream infile_index(nombre_archivo_index, ios::binary);
+    ifstream infile_index(pk_archivo_index, ios::binary);
     if (!infile_index.is_open()) {
         cerr << "Archivo de índice no encontrado. Se generarán nuevos datos.\n";
         return false;
     }
 
-    // Leer el número de registros
-    uint32_t num_registros;
-    infile_index.read(reinterpret_cast<char*>(&num_registros), sizeof(num_registros));
-
-    // Leer cada DNI y su offset
-    for (uint32_t i = 0; i < num_registros; ++i) {
-        uint32_t dni;
-        uint32_t offset;
-        infile_index.read(reinterpret_cast<char*>(&dni), sizeof(dni));
+    // Leer todos los pares dni y offset
+    dnis.clear(); // Asegurarse de que esté vacío
+    uint32_t dni, offset;
+    while (infile_index.read(reinterpret_cast<char*>(&dni), sizeof(dni))) {
         infile_index.read(reinterpret_cast<char*>(&offset), sizeof(offset));
 
         if (infile_index.fail()) {
-            cerr << "Error al leer el índice para el registro " << i + 1 << ".\n";
+            cerr << "Error al leer el índice.\n";
             infile_index.close();
             return false;
         }
 
         dnis.push_back(dni);
-        cuckooHash.insertar(dni, offset);
+
+        // Actualizar next_data_offset si es necesario
+        if (offset + sizeof(CiudadanoOptimizado) > next_data_offset) {
+            next_data_offset = offset + sizeof(CiudadanoOptimizado);
+        }
     }
 
     infile_index.close();
 
-    cout << "Cargados " << num_registros << " registros desde los archivos binarios.\n";
+    // Asegurarse de que el archivo de datos esté abierto en modo append
+    if (!outfile_data.is_open()) {
+        outfile_data.open(ciudadano_archivo_data, ios::binary | ios::app);
+    }
+
+    cout << "Cargados " << dnis.size() << " registros desde los archivos binarios.\n";
     return true;
 }
 
-// Función para guardar los datos en los archivos binarios
 bool RegistroCiudadanos::guardarEnArchivo() {
-    // Reescribir el archivo de índice
-    ofstream outfile_index(nombre_archivo_index, ios::binary | ios::trunc);
+    // Reescribir el archivo de índice completo
+    ofstream outfile_index(pk_archivo_index, ios::binary | ios::trunc);
     if (!outfile_index.is_open()) {
-        cerr << "No se pudo abrir el archivo " << nombre_archivo_index << " para escribir el índice.\n";
+        cerr << "No se pudo abrir el archivo " << pk_archivo_index << " para escribir el índice.\n";
         return false;
     }
-
-    uint32_t num_registros = dnis.size();
-    outfile_index.write(reinterpret_cast<const char*>(&num_registros), sizeof(num_registros));
 
     for (uint32_t dni : dnis) {
         uint32_t offset;
@@ -373,11 +372,25 @@ bool RegistroCiudadanos::guardarEnArchivo() {
 
     outfile_index.close();
 
-    cout << "Índice guardado correctamente en " << nombre_archivo_index << ".\n";
+    cout << "Índice guardado correctamente en " << pk_archivo_index << ".\n";
     return true;
 }
 
+bool RegistroCiudadanos::guardarEnArchivoIncremental(uint32_t dni, uint32_t offset) {
+    ofstream outfile_index(pk_archivo_index, ios::binary | ios::app);
+    if (!outfile_index.is_open()) {
+        cerr << "No se pudo abrir el archivo " << pk_archivo_index << " para escribir el índice.\n";
+        return false;
+    }
 
+    outfile_index.write(reinterpret_cast<const char*>(&dni), sizeof(dni));
+    outfile_index.write(reinterpret_cast<const char*>(&offset), sizeof(offset));
+    outfile_index.close();
+
+    return true;
+}
+
+// Resto del código permanece igual
 // Función para imprimir tres DNIs aleatorios
 void RegistroCiudadanos::imprimirTresDniAleatorios() {
     if (dnis.empty()) {
@@ -444,6 +457,7 @@ void RegistroCiudadanos::exportarACSV(const string& nombre_archivo) {
     archivo_csv.close();
     cout << "Datos exportados correctamente a " << nombre_archivo << ".\n";
 }
+
 string RegistroCiudadanos::generarEmailAleatorio(const string& nombre, const string& dominio) {
     string email = nombre;
     // Reemplazar espacios con puntos y convertir a minúsculas
@@ -483,11 +497,11 @@ string RegistroCiudadanos::leerEmail(const string& mensaje) {
     }
 }
 
-uint32_t RegistroCiudadanos::leerEntero(const string& mensaje,uint32_t min, uint32_t max) {
+uint32_t RegistroCiudadanos::leerEntero(const string& mensaje, uint32_t min, uint32_t max) {
     uint32_t numero;
 
-    while (true) { // Bucle infinito hasta que el usuario ingrese un valor válido
-        cout<<mensaje;
+    while (true) {
+        cout << mensaje;
         cin >> numero;
 
         // Verificar si la entrada es numérica y está en el rango
@@ -496,9 +510,9 @@ uint32_t RegistroCiudadanos::leerEntero(const string& mensaje,uint32_t min, uint
             cin.ignore(numeric_limits<streamsize>::max(), '\n');
             return numero;
         } else {
-            // Entrada inválida: limpiar el estado de error y el buffer
             cin.clear(); // Limpiar el estado de error
             cin.ignore(numeric_limits<streamsize>::max(), '\n'); // Ignorar el resto de la línea
+            cout << "Entrada inválida. Por favor, ingrese un número entre " << min << " y " << max << ".\n";
         }
     }
 }
@@ -522,6 +536,7 @@ string RegistroCiudadanos::leerTexto(const string& mensaje) {
         }
     }
 }
+
 string RegistroCiudadanos::leerTexto(const string& mensaje, const vector<string>& opciones) {
     Sugeridor sugeridor;
     string entrada;
@@ -553,4 +568,36 @@ string RegistroCiudadanos::leerTexto(const string& mensaje, const vector<string>
             cout << "Entrada inválida. Por favor, ingrese solo letras y espacios.\n";
         }
     }
+}
+
+void RegistroCiudadanos::reconstruirTablaHash() {
+    cout << "Reconstruyendo la tabla hash desde el índice...\n";
+
+    // Abrir el archivo de índice para leer los DNIs y offsets
+    ifstream infile_index(pk_archivo_index, ios::binary);
+    if (!infile_index.is_open()) {
+        cerr << "No se pudo abrir el archivo " << pk_archivo_index << " para leer el índice.\n";
+        return;
+    }
+
+    uint32_t num_registros;
+    infile_index.read(reinterpret_cast<char*>(&num_registros), sizeof(num_registros));
+
+    for (uint32_t i = 0; i < num_registros; ++i) {
+        uint32_t dni;
+        uint32_t offset;
+        infile_index.read(reinterpret_cast<char*>(&dni), sizeof(dni));
+        infile_index.read(reinterpret_cast<char*>(&offset), sizeof(offset));
+
+        if (infile_index.fail()) {
+            cerr << "Error al leer el índice para el registro " << i + 1 << ".\n";
+            infile_index.close();
+            return;
+        }
+
+        cuckooHash.insertar(dni, offset);
+    }
+
+    infile_index.close();
+    cout << "Tabla hash reconstruida correctamente.\n";
 }
