@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <fstream>
 #include "CuckooHashTab.h"
 #include "Ciudadano.h"
 #include "Tablas.h"
@@ -22,6 +23,7 @@ public:
     void exportarACSV(const std::string& nombre_archivo);
 
     Tablas tablas;
+    std::string hash_archivo;
 
 private:
     CuckooHashTab cuckooHash;
@@ -30,23 +32,25 @@ private:
     static const uint32_t DNI_MIN = 10000000;
     static const uint32_t DNI_MAX = 99999999;
 
-    std::string nombre_archivo_data;
-    std::string nombre_archivo_index;
+    std::string ciudadano_archivo_data;
+    std::string pk_archivo_index;
+    uint32_t next_data_offset;
 
-    uint32_t generarDniAleatorio();
-    std::string generarNombreAleatorio();
-    std::string generarApellidoAleatorio();
-    uint32_t generarTelefonoAleatorio();
-    std::string generarEmailAleatorio(const std::string& nombre, const std::string& dominio);
-    std::string generarUbicacionAleatoria();
-    std::uint32_t leerEntero(const std::string& mensaje,uint32_t min, uint32_t max);
-    std::string leerTexto();
+    // Archivo de datos mantenido abierto durante la ejecución
+    std::ofstream outfile_data;
+
+    // Métodos auxiliares
+    uint32_t leerEntero(const std::string& mensaje, uint32_t min, uint32_t max);
     std::string leerTexto(const std::string& mensaje);
     std::string leerEmail(const std::string& mensaje);
     std::string leerTexto(const std::string& mensaje, const std::vector<std::string>& opciones);
+    std::string generarEmailAleatorio(const std::string& nombre, const std::string& dominio);
+    void reconstruirTablaHash();
+    bool hash_modificado;
 
     bool cargarDesdeArchivo();
-    bool guardarEnArchivo();
+    bool guardarEnArchivo(); // Guarda todo el índice
+    bool guardarEnArchivoIncremental(uint32_t dni, uint32_t offset); // Agrega un registro al índice
 };
 
 #endif
