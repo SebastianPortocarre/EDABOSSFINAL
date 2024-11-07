@@ -11,18 +11,16 @@ struct Entry {
 
 class CuckooHashTab {
 public:
-    CuckooHashTab(int initial_size = 22000000, int num_tables = 2);
+    CuckooHashTab(int initial_size = 33000000, int num_tables = 2);
     void insertar(uint32_t dni, uint32_t offset);
     bool buscar(uint32_t dni, uint32_t& offset) const;
     void eliminar(uint32_t dni);
+    void guardarEnArchivo(const std::string& filename) const;
+    bool cargarDesdeArchivo(const std::string& filename);
 
 private:
     size_t hash1(uint32_t dni) const;
     size_t hash2(uint32_t dni) const;
-    size_t hash3(uint32_t dni) const;
-    size_t hash4(uint32_t dni) const;
-
-    int hash(int table_idx, uint32_t dni, int hash_variant) const;
 
     void rehash();
 
@@ -30,13 +28,10 @@ private:
     int num_tables;
     std::vector<std::vector<Entry>> tables;
 
-    const int rehash_limit = 500;
+    const int rehash_limit = 3000;
     uint32_t seed1;
     uint32_t seed2;
-    uint32_t seed3;
-    uint32_t seed4;
 
-    // Función de hash MurmurHash3 para uint32_t
     uint32_t murmur3_32(uint32_t key, uint32_t seed) const;
 };
 
